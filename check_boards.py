@@ -113,8 +113,13 @@ def send_telegram(token: str, chat_id: str, text: str) -> None:
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage", data=data
     )
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        # 텔레그램은 오류 원인을 JSON body로 알려준다 (예: chat not found)
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"텔레그램 전송 실패 {e.code}: {body}") from None
 
 
 def main() -> int:
