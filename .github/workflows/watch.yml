@@ -2,7 +2,8 @@ name: watch-boards
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    # 정각·5분 배수는 예약이 몰려 GitHub가 크게 지연시키므로 어긋난 분(minute)을 사용
+    - cron: "3,10,17,24,31,38,45,52,59 * * * *"
   workflow_dispatch:
 
 permissions:
