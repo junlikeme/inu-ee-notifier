@@ -7,15 +7,15 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/songjunhyuk/Documents/Codex/inu-ee-notifier/run_local.sh</string>
+        <string>/Users/songjunhyuk/.inu-ee-notifier/run_local.sh</string>
     </array>
     <key>StartInterval</key>
     <integer>300</integer>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/songjunhyuk/Documents/Codex/inu-ee-notifier/local_run.log</string>
+    <string>/Users/songjunhyuk/.inu-ee-notifier/local_run.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/songjunhyuk/Documents/Codex/inu-ee-notifier/local_run.log</string>
+    <string>/Users/songjunhyuk/.inu-ee-notifier/local_run.log</string>
 </dict>
 </plist>
