@@ -66,6 +66,33 @@ python3 check_boards.py --dry-run
 
 토큰 없이 실행되며, 보낼 알림 내용을 화면에 출력만 한다.
 
+## Mac 로컬 병행 실행 (5분 간격)
+
+GitHub Actions 무료 스케줄러는 실제로 1~3시간 간격으로만 실행되는 경우가 많다.
+그래서 Mac이 켜져 있는 동안은 launchd로 정확히 5분마다 병행 실행한다.
+
+- 실행 사본 위치: `~/.inu-ee-notifier` (원본은 `Documents/Codex/inu-ee-notifier`)
+- **`~/Documents` 아래에서 직접 돌리면 안 된다.** macOS 보안(TCC)이 launchd의 Documents 접근을
+  차단해 `Operation not permitted`(exit 126)로 실패한다.
+- 토큰은 `.env.local`(권한 600, git 제외)에 저장. `setup_local_token.py`로 생성.
+- 로그: `~/.inu-ee-notifier/local_run.log`
+
+설치:
+
+```bash
+git clone https://github.com/junlikeme/inu-ee-notifier.git ~/.inu-ee-notifier
+cd ~/.inu-ee-notifier && python3 setup_local_token.py
+cp com.junhyuk.inu-ee-notifier.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.junhyuk.inu-ee-notifier.plist
+```
+
+plist를 수정했다면 `launchctl bootout gui/$(id -u)/com.junhyuk.inu-ee-notifier`로 먼저 내린 뒤
+다시 복사·bootstrap 해야 반영된다. 상태 확인:
+
+```bash
+launchctl print gui/$(id -u)/com.junhyuk.inu-ee-notifier | grep -E "state|last exit"
+```
+
 ## 주의
 
 - GitHub는 60일간 리포지토리에 활동이 없으면 스케줄 실행을 자동 중지한다.
