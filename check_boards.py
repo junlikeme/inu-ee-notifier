@@ -14,6 +14,8 @@ import json
 import os
 import re
 import sys
+import time
+from datetime import datetime, timezone
 import urllib.parse
 import urllib.request
 from http.cookiejar import CookieJar
@@ -23,6 +25,8 @@ BASE = "https://ee.inu.ac.kr"
 MAIN_URL = f"{BASE}/electron/index.do"
 STATE_FILE = Path(__file__).parent / "state.json"
 KEEP_PER_BOARD = 300  # state에 보관할 글 번호 수 (게시판당)
+HEALTH_KEY = "_health"  # 소스별 연속 실패 추적 (state.json 안)
+ALERT_AFTER_HOURS = 6  # 이 시간 이상 계속 실패하면 텔레그램으로 경보
 
 # 메인 페이지 위젯에서 읽는 게시판: fnct 번호 → 이름
 MAIN_PAGE_BOARDS = {
@@ -43,10 +47,19 @@ UA = (
 )
 
 
-def fetch(url: str, opener) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with opener.open(req, timeout=20) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+def fetch(url: str, opener, attempts: int = 3) -> str:
+    """학교 서버가 간헐적으로 응답하지 않으므로 재시도한다."""
+    last_error = None
+    for i in range(attempts):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with opener.open(req, timeout=15) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as e:  # 타임아웃·일시적 5xx·DNS 모두 재시도 대상
+            last_error = e
+            if i < attempts - 1:
+                time.sleep(3 * (i + 1))
+    raise last_error
 
 
 def clean(text: str) -> str:
@@ -122,6 +135,51 @@ def send_telegram(token: str, chat_id: str, text: str) -> None:
         raise RuntimeError(f"텔레그램 전송 실패 {e.code}: {body}") from None
 
 
+def save_state(state: dict) -> None:
+    STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+
+
+def check_health(state: dict, source_ok: dict, token: str, chat_id: str,
+                 dry_run: bool) -> None:
+    """오래 끊긴 소스가 있으면 텔레그램으로 한 번만 경보한다.
+
+    학교 서버 점검 같은 일시적 장애는 조용히 넘기고(워크플로도 실패 처리하지 않음),
+    ALERT_AFTER_HOURS 이상 계속 실패할 때만 알린다. 홈페이지 구조 변경으로
+    조용히 알림이 끊기는 상황을 잡기 위한 장치.
+    """
+    health = state.get(HEALTH_KEY) or {}
+    now = datetime.now(timezone.utc)
+    stale = []
+    for name, ok in source_ok.items():
+        if ok:
+            health.pop(name, None)
+            continue
+        rec = health.setdefault(name, {"since": now.isoformat(), "alerted": False})
+        try:
+            hours = (now - datetime.fromisoformat(rec["since"])).total_seconds() / 3600
+        except ValueError:  # 손상된 기록은 지금부터 다시 센다
+            rec["since"], rec["alerted"], hours = now.isoformat(), False, 0.0
+        if hours >= ALERT_AFTER_HOURS and not rec.get("alerted"):
+            # 동시에 여러 소스가 끊겨도 메시지는 한 통으로 묶는다
+            stale.append(f"{name} ({int(hours)}시간째)")
+            rec["alerted"] = True
+    state[HEALTH_KEY] = health
+
+    if stale:
+        text = (
+            "⚠️ <b>알리미 점검 필요</b>\n"
+            + "\n".join(f"• {line}" for line in stale)
+            + "\n확인이 계속 실패하고 있습니다."
+            " 학교 홈페이지 구조가 바뀌었거나 서버 장애일 수 있습니다."
+        )
+        if dry_run:
+            print(f"--- DRY RUN 경보 ---\n{text}\n")
+        else:
+            send_telegram(token, chat_id, text)
+
+
 def main() -> int:
     dry_run = "--dry-run" in sys.argv
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -141,16 +199,20 @@ def main() -> int:
     # 게시판별 수집: {fnct: {"name": ..., "posts": [(seq, title, date), ...]}}
     boards = {}
     errors = []
+    source_ok = {}  # 소스별 수집 성공 여부 (건강 점검용)
 
     try:
         page = fetch(MAIN_URL, opener)
-        for fnct, posts in parse_main_page(page).items():
+        found = parse_main_page(page)
+        for fnct, posts in found.items():
             if posts:
                 boards[fnct] = {"name": MAIN_PAGE_BOARDS[fnct], "posts": posts}
             else:
                 errors.append(f"메인 페이지에서 {MAIN_PAGE_BOARDS[fnct]}(fnct {fnct}) 글을 찾지 못함")
+        source_ok["메인 페이지"] = any(found.values())
     except Exception as e:
         errors.append(f"메인 페이지 로드 실패: {e}")
+        source_ok["메인 페이지"] = False
 
     for menu, name in SUBVIEW_BOARDS.items():
         try:
@@ -164,14 +226,22 @@ def main() -> int:
                 }
             else:
                 errors.append(f"{name}(menu {menu}) 글을 찾지 못함")
+            source_ok[name] = bool(rows)
         except Exception as e:
             errors.append(f"{name}(menu {menu}) 로드 실패: {e}")
+            source_ok[name] = False
 
     for msg in errors:
         print(f"경고: {msg}", file=sys.stderr)
+
+    check_health(state, source_ok, token, chat_id, dry_run)
+
     if not boards:
-        print("모든 게시판 수집 실패", file=sys.stderr)
-        return 1
+        # 학교 서버 일시 장애. 다음 회차에 자동 복구되므로 실패로 처리하지 않는다
+        # (오탐 메일 방지). 장애가 길어지면 check_health 가 텔레그램으로 알린다.
+        print("모든 게시판 수집 실패 — 일시적 장애로 보고 이번 회차 건너뜀", file=sys.stderr)
+        save_state(state)
+        return 0
 
     notified = 0
     for fnct, info in boards.items():
@@ -201,9 +271,7 @@ def main() -> int:
         deduped = list(dict.fromkeys(merged))
         state[fnct] = deduped[:KEEP_PER_BOARD]
 
-    STATE_FILE.write_text(
-        json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8"
-    )
+    save_state(state)
     print(f"완료: 게시판 {len(boards)}개 확인, 새 글 알림 {notified}건")
     return 0
 
